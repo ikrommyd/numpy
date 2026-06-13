@@ -3669,7 +3669,15 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
                      _reduce_type[operation]);
         return NULL;
     }
-    if (ufunc->nout != 1) {
+    if (ufunc->nout == 2 && ufunc->reduction_loops == NULL) {
+        PyErr_Format(PyExc_ValueError,
+                     "%s is supported for functions returning "
+                     "two values only if a reduction loop "
+                     "is registered",
+                     _reduce_type[operation]);
+        return NULL;
+    }
+    if (ufunc->nout != 1 && ufunc->nout != 2) {
         PyErr_Format(PyExc_ValueError,
                      "%s only supported for functions "
                      "returning a single value",
@@ -5030,6 +5038,8 @@ PyUFunc_FromFuncAndDataAndSignatureAndIdentity(PyUFuncGenericFunction *func, voi
 
     ufunc->process_core_dims_func = NULL;
 
+    ufunc->reduction_loops = NULL;
+
     ufunc->op_flags = NULL;
     ufunc->_loops = NULL;
     if (nin + nout != 0) {
@@ -5494,6 +5504,37 @@ _PyUFuncObject_GET_ITEM_DATA(const PyUFuncObject *obj)
     return (PyUFuncObject_fields *)((char *)obj + sizeof(PyObject));
 }
 
+/*UFUNC_API*/
+NPY_NO_EXPORT int
+PyUFunc_RegisterReductionLoop(PyUFuncObject *ufunc,
+                              PyUFuncGenericFunction *functions,
+                              void **data,
+                              const char *types,
+                              int ntypes,
+                              int nin,
+                              int nout)
+{
+    if (nout < 2 || nin != nout + 1) {
+        PyErr_SetString(PyExc_ValueError,
+                        "reduction loop requires nout >= 2 and nin == nout + 1");
+        return -1;
+    }
+    PyUFunc_ReductionLoops *rl = PyArray_malloc(sizeof(*rl));
+    if (rl == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    rl->functions = functions;
+    rl->data = data;
+    rl->types = types;
+    rl->ntypes = ntypes;
+    rl->nin = nin;
+    rl->nout = nout;
+    PyArray_free(ufunc->reduction_loops);
+    ufunc->reduction_loops = rl;
+    return 0;
+}
+
 static void
 ufunc_dealloc(PyUFuncObject *ufunc)
 {
@@ -5515,6 +5556,9 @@ ufunc_dealloc(PyUFuncObject *ufunc)
     Py_XDECREF(ufunc->_loops);
     if (ufunc->_dispatch_cache != NULL) {
         PyArrayIdentityHash_Dealloc(ufunc->_dispatch_cache);
+    }
+    if (ufunc->reduction_loops != NULL) {
+        PyArray_free(ufunc->reduction_loops);
     }
     PyObject_GC_Del(ufunc);
 }

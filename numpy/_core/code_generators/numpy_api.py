@@ -481,6 +481,7 @@ ufunc_funcs_api = {
     # End 2.0 API
     'PyUFunc_AddLoopsFromSpecs':                     (47, MinVersion("2.4")),
     '_PyUFuncObject_GET_ITEM_DATA':                  (48, MinVersion("2.5")),
+    'PyUFunc_RegisterReductionLoop':                 (49, MinVersion("2.6")),
 }
 
 # List of all the dicts which define the C API

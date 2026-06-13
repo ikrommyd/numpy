@@ -99,6 +99,15 @@ typedef int (PyUFunc_ProcessCoreDimsFunc)(
                                 struct _tagPyUFuncObject *ufunc,
                                 npy_intp *core_dim_sizes);
 
+typedef struct {
+    PyUFuncGenericFunction *functions;   /* one reduction loop per dtype row */
+    void **data;                         /* per-row auxiliary data, or NULL */
+    const char *types;                   /* (nin+nout) type codes per row */
+    int ntypes;                          /* number of dtype rows */
+    int nin;                             /* reduction-loop inputs == nout + 1 */
+    int nout;                            /* number of accumulators/outputs */
+} PyUFunc_ReductionLoops;
+
 typedef struct _tagPyUFuncObject {
 #ifndef Py_TARGET_ABI3T
         PyObject_HEAD
@@ -233,6 +242,9 @@ typedef struct _tagPyUFuncObject {
          * Optional function to process core dimensions of a gufunc.
          */
         PyUFunc_ProcessCoreDimsFunc *process_core_dims_func;
+    #endif
+    #if NPY_FEATURE_VERSION >= NPY_2_6_API_VERSION
+        PyUFunc_ReductionLoops *reduction_loops;
     #endif
 } PyUFuncObject_fields;
 
