@@ -842,6 +842,41 @@ add_and_return_legacy_wrapping_ufunc_loop(PyUFuncObject *ufunc,
 }
 
 
+NPY_NO_EXPORT PyObject *
+add_and_return_reduction_wrapping_loop(PyUFuncObject *ufunc,
+        PyArray_DTypeMeta *operation_dtypes[], int ignore_duplicate)
+{
+    int nargs = ufunc->reduction_loops->nin + ufunc->reduction_loops->nout;
+    PyObject *DType_tuple = PyArray_TupleFromItems(nargs,
+            (PyObject **) operation_dtypes, 0);
+    if (DType_tuple == NULL) {
+        return NULL;
+    }
+
+    PyArrayMethodObject *method = PyArray_NewLegacyWrappingReductionMethod(
+            ufunc, operation_dtypes);
+    if (method == NULL) {
+        Py_DECREF(DType_tuple);
+        return NULL;
+    }
+    PyObject *info = PyTuple_Pack(2, DType_tuple, method);
+    Py_DECREF(DType_tuple);
+    Py_DECREF(method);
+    if (info == NULL) {
+        return NULL;
+    }
+
+    PyObject *key = PyTuple_GET_ITEM(info, 0);
+    if (PyDict_SetItem(ufunc->_reduction_loops, key, info) < 0) {
+        Py_DECREF(info);
+        return NULL;
+    }
+    PyObject *result = PyDict_GetItemWithError(
+            ufunc->_reduction_loops, key);
+    Py_DECREF(info);
+    return result;
+}
+
 /*
  * The main implementation to find the correct DType signature and ArrayMethod
  * to use for a ufunc.  This function may recurse with `do_legacy_fallback`

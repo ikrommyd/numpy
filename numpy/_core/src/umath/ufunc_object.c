@@ -5039,6 +5039,7 @@ PyUFunc_FromFuncAndDataAndSignatureAndIdentity(PyUFuncGenericFunction *func, voi
     ufunc->process_core_dims_func = NULL;
 
     ufunc->reduction_loops = NULL;
+    ufunc->_reduction_loops = NULL;
 
     ufunc->op_flags = NULL;
     ufunc->_loops = NULL;
@@ -5532,6 +5533,26 @@ PyUFunc_RegisterReductionLoop(PyUFuncObject *ufunc,
     rl->nout = nout;
     PyArray_free(ufunc->reduction_loops);
     ufunc->reduction_loops = rl;
+
+    /* Eagerly wrap each signature into an ArrayMethod, mirroring how the
+       ufunc constructor wraps elementwise loops into `_loops`. */
+    Py_XSETREF(ufunc->_reduction_loops, PyDict_New());
+    if (ufunc->_reduction_loops == NULL) {
+        return -1;
+    }
+    int nargs = nin + nout;
+    const char *t = types;
+    for (int row = 0; row < ntypes; row++, t += nargs) {
+        PyArray_DTypeMeta *op_dtypes[NPY_MAXARGS];
+        for (int a = 0; a < nargs; a++) {
+            op_dtypes[a] = PyArray_DTypeFromTypeNum(t[a]);
+            /* builtin DTypes are immortal; borrow the reference */
+            Py_DECREF(op_dtypes[a]);
+        }
+        if (add_and_return_reduction_wrapping_loop(ufunc, op_dtypes, 1) == NULL) {
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -5560,6 +5581,7 @@ ufunc_dealloc(PyUFuncObject *ufunc)
     if (ufunc->reduction_loops != NULL) {
         PyArray_free(ufunc->reduction_loops);
     }
+    Py_XDECREF(ufunc->_reduction_loops);
     PyObject_GC_Del(ufunc);
 }
 

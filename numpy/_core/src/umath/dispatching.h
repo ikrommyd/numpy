@@ -32,6 +32,10 @@ NPY_NO_EXPORT PyObject *
 add_and_return_legacy_wrapping_ufunc_loop(PyUFuncObject *ufunc,
         PyArray_DTypeMeta *operation_dtypes[], int ignore_duplicate);
 
+NPY_NO_EXPORT PyObject *
+add_and_return_reduction_wrapping_loop(PyUFuncObject *ufunc,
+        PyArray_DTypeMeta *operation_dtypes[], int ignore_duplicate);
+
 NPY_NO_EXPORT int
 default_ufunc_promoter(PyObject *ufunc,
         PyArray_DTypeMeta *op_dtypes[], PyArray_DTypeMeta *signature[],

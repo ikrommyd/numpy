@@ -475,3 +475,110 @@ PyArray_NewLegacyWrappingArrayMethod(PyUFuncObject *ufunc,
 
     return res;
 }
+
+
+NPY_NO_EXPORT int
+get_wrapped_reduction_loop(PyArrayMethod_Context *context,
+        int aligned, int move_references,
+        const npy_intp *NPY_UNUSED(strides),
+        PyArrayMethod_StridedLoop **out_loop,
+        NpyAuxData **out_transferdata,
+        NPY_ARRAYMETHOD_FLAGS *flags)
+{
+    assert(aligned);
+    assert(!move_references);
+
+    if (context->caller == NULL ||
+            !PyObject_TypeCheck(context->caller, &PyUFunc_Type)) {
+        PyErr_Format(PyExc_RuntimeError,
+                "cannot call %s without its ufunc as caller context.",
+                context->method->name);
+        return -1;
+    }
+
+    PyUFuncObject *ufunc = (PyUFuncObject *)context->caller;
+    PyUFunc_ReductionLoops *rl = ufunc->reduction_loops;
+    PyUFuncGenericFunction loop = NULL;
+
+    if (rl == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                "ufunc has no registered reduction loops");
+        return -1;
+    }
+
+    int nargs = rl->nin + rl->nout;
+    int stream_type = context->descriptors[rl->nout]->type_num;
+    void *user_data = NULL;
+
+    for (int i = 0; i < rl->ntypes; i++) {
+        if (rl->types[i * nargs + rl->nout] == stream_type) {
+            loop = rl->functions[i];
+            user_data = rl->data ? rl->data[i] : NULL;
+            break;
+        }
+    }
+    if (loop == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                "no reduction loop registered for dtype num %d", stream_type);
+        return -1;
+    }
+
+    *flags = context->method->flags & NPY_METH_RUNTIME_FLAGS;
+    *out_loop = &generic_wrapped_legacy_loop;
+    *out_transferdata = get_new_loop_data(
+            loop, user_data, (*flags & NPY_METH_REQUIRES_PYAPI) != 0);
+    if (*out_transferdata == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    return 0;
+}
+
+
+NPY_NO_EXPORT PyArrayMethodObject *
+PyArray_NewLegacyWrappingReductionMethod(PyUFuncObject *ufunc,
+        PyArray_DTypeMeta *signature[])
+{
+    char method_name[101];
+    const char *name = ufunc->name ? ufunc->name : "<unknown>";
+    snprintf(method_name, 100, "reduction_wrapper_for_%s", name);
+
+    int nin = ufunc->reduction_loops->nin;
+    int nout = ufunc->reduction_loops->nout;
+
+    NPY_ARRAYMETHOD_FLAGS flags = NPY_METH_IS_REORDERABLE;
+    for (int i = 0; i < nin + nout; i++) {
+        if (signature[i]->singleton->flags & (
+                NPY_ITEM_REFCOUNT | NPY_ITEM_IS_POINTER | NPY_NEEDS_PYAPI)) {
+            flags |= NPY_METH_REQUIRES_PYAPI;
+        }
+    }
+    if ((ufunc->_ufunc_flags & UFUNC_NO_FLOATINGPOINT_ERRORS) &&
+            !(flags & NPY_METH_REQUIRES_PYAPI)) {
+        flags |= NPY_METH_NO_FLOATINGPOINT_ERRORS;
+    }
+
+    PyType_Slot slots[3] = {
+        {NPY_METH_get_loop, (void *)&get_wrapped_reduction_loop},
+        {NPY_METH_resolve_descriptors, (void *)&simple_legacy_resolve_descriptors},
+        {0, NULL},
+    };
+    PyArrayMethod_Spec spec = {
+        .name = method_name,
+        .nin = nin,
+        .nout = nout,
+        .casting = NPY_NO_CASTING,
+        .flags = flags,
+        .dtypes = signature,
+        .slots = slots,
+    };
+
+    PyBoundArrayMethodObject *bound_res = PyArrayMethod_FromSpec_int(&spec, 1);
+    if (bound_res == NULL) {
+        return NULL;
+    }
+    PyArrayMethodObject *res = bound_res->method;
+    Py_INCREF(res);
+    Py_DECREF(bound_res);
+    return res;
+}

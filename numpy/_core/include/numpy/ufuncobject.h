@@ -245,6 +245,7 @@ typedef struct _tagPyUFuncObject {
     #endif
     #if NPY_FEATURE_VERSION >= NPY_2_6_API_VERSION
         PyUFunc_ReductionLoops *reduction_loops;
+        PyObject *_reduction_loops;
     #endif
 } PyUFuncObject_fields;
 
