@@ -3669,6 +3669,13 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
                      _reduce_type[operation]);
         return NULL;
     }
+    if (operation != UFUNC_REDUCE && ufunc->nout != 1) {
+        PyErr_Format(PyExc_ValueError,
+                     "%s only supported for functions "
+                     "returning a single value",
+                     _reduce_type[operation]);
+        return NULL;
+    }
     if (ufunc->nout == 2 && ufunc->reduction_loops == NULL) {
         PyErr_Format(PyExc_ValueError,
                      "%s is supported for functions returning "
