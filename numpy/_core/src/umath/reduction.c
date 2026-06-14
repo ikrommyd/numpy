@@ -174,7 +174,7 @@ PyArray_CopyInitialReduceValues(
  * would be quite nice to support axis= and keepdims etc. for arbitrary
  * generalized ufuncs!)
  */
-NPY_NO_EXPORT PyArrayObject *
+NPY_NO_EXPORT PyObject *
 PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
         PyArrayObject *operand, PyArrayObject *out, PyArrayObject *wheremask,
         npy_bool *axis_flags, int keepdims,
@@ -182,22 +182,29 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
         npy_intp buffersize, const char *funcname, int errormask)
 {
     assert(loop != NULL);
+    assert(context->method->nin == context->method->nout + 1);
     PyArrayObject *result = NULL;
     npy_intp skip_first_count = 0;
+    int nout = context->method->nout;
 
     /* Iterator parameters */
     NpyIter *iter = NULL;
-    PyArrayObject *op[3];
-    PyArray_Descr *op_dtypes[3];
-    npy_uint32 it_flags, op_flags[3];
+    PyArrayObject *op[NPY_MAXARGS];
+    PyArray_Descr *op_dtypes[NPY_MAXARGS];
+    npy_uint32 it_flags, op_flags[NPY_MAXARGS];
     /* Loop auxdata (must be freed on error) */
     NpyAuxData *auxdata = NULL;
 
     /* Set up the iterator */
-    op[0] = out;
-    op[1] = operand;
-    op_dtypes[0] = context->descriptors[0];
-    op_dtypes[1] = context->descriptors[1];
+    for (int i = 0; i < nout; i++) {
+        op[i] = NULL;
+        op_dtypes[i] = context->descriptors[i];
+    }
+    if (nout == 1) {
+        op[0] = out;
+    }
+    op[nout] = operand;
+    op_dtypes[nout] = context->descriptors[nout];
 
     /* Buffer to use when we need an initial value */
     char *initial_buf = NULL;
@@ -225,27 +232,34 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
             NPY_ITER_DONT_NEGATE_STRIDES |
             NPY_ITER_COPY_IF_OVERLAP;
 
-    op_flags[0] = NPY_ITER_READWRITE |
-                  NPY_ITER_ALIGNED |
-                  NPY_ITER_ALLOCATE |
-                  NPY_ITER_NO_SUBTYPE;
-    op_flags[1] = NPY_ITER_READONLY |
+    for (int i = 0; i < nout; i++) {
+        op_flags[i] = NPY_ITER_READWRITE |
+                    NPY_ITER_ALIGNED |
+                    NPY_ITER_ALLOCATE |
+                    NPY_ITER_NO_SUBTYPE;
+    }
+    op_flags[nout] = NPY_ITER_READONLY |
                   NPY_ITER_ALIGNED |
                   NPY_ITER_NO_BROADCAST;
 
     if (wheremask != NULL) {
-        op[2] = wheremask;
+        op[nout + 1] = wheremask;
         /* wheremask is guaranteed to be NPY_BOOL, so borrow its reference */
-        op_dtypes[2] = PyArray_DESCR(wheremask);
-        assert(op_dtypes[2]->type_num == NPY_BOOL);
-        if (op_dtypes[2] == NULL) {
+        op_dtypes[nout + 1] = PyArray_DESCR(wheremask);
+        assert(op_dtypes[nout + 1]->type_num == NPY_BOOL);
+        if (op_dtypes[nout + 1] == NULL) {
             goto fail;
         }
-        op_flags[2] = NPY_ITER_READONLY;
+        op_flags[nout + 1] = NPY_ITER_READONLY;
     }
     /* Set up result array axes mapping, operand and wheremask use default */
     int result_axes[NPY_MAXDIMS];
-    int *op_axes[3] = {result_axes, NULL, NULL};
+    int *op_axes[NPY_MAXARGS];
+    for (int i = 0; i < nout; i++) {
+        op_axes[i] = result_axes;
+    }
+    op_axes[nout] = NULL;
+    op_axes[nout + 1] = NULL;
 
     int curr_axis = 0;
     for (int i = 0; i < PyArray_NDIM(operand); i++) {
@@ -264,6 +278,12 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
         }
     }
     if (out != NULL) {
+        if (NPY_UNLIKELY(nout > 1)) {
+            PyErr_SetString(PyExc_ValueError,
+                        "output parameter cannot be used with reductions "
+                        "that return more than one outputs");
+            goto fail;
+        }
         /* NpyIter does not raise a good error message in this common case. */
         if (NPY_UNLIKELY(curr_axis != PyArray_NDIM(out))) {
             if (keepdims) {
@@ -283,7 +303,7 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
         }
     }
 
-    iter = NpyIter_AdvancedNew(wheremask == NULL ? 2 : 3, op, it_flags,
+    iter = NpyIter_AdvancedNew(wheremask == NULL ? nout + 1 : nout + 2, op, it_flags,
                                NPY_KEEPORDER, NPY_UNSAFE_CASTING,
                                op_flags,
                                op_dtypes,
@@ -368,13 +388,16 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
      */
     if (initial_buf != NULL) {
         /* Loop provided an identity or default value, assign to result. */
-        int ret = raw_array_assign_scalar(
-                PyArray_NDIM(result), PyArray_DIMS(result),
-                PyArray_DESCR(result),
-                PyArray_BYTES(result), PyArray_STRIDES(result),
-                op_dtypes[0], initial_buf, NPY_UNSAFE_CASTING);
-        if (ret < 0) {
-            goto fail;
+        for (int i = 0; i < nout; i++) {
+            PyArrayObject *res_i = NpyIter_GetOperandArray(iter)[i];
+            int ret = raw_array_assign_scalar(
+                    PyArray_NDIM(res_i), PyArray_DIMS(res_i),
+                    PyArray_DESCR(res_i),
+                    PyArray_BYTES(res_i), PyArray_STRIDES(res_i),
+                    op_dtypes[i], initial_buf, NPY_UNSAFE_CASTING);
+            if (ret < 0) {
+                goto fail;
+            }
         }
     }
     else {
@@ -392,10 +415,13 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
          * reductions are not super common.
          * (see also comment in CopyInitialReduceValues)
          */
-        skip_first_count = PyArray_CopyInitialReduceValues(
-                result, operand, axis_flags, funcname, keepdims);
-        if (skip_first_count < 0) {
-            goto fail;
+        for (int i = 0; i < nout; i++) {
+            PyArrayObject *res_i = NpyIter_GetOperandArray(iter)[i];
+            skip_first_count = PyArray_CopyInitialReduceValues(
+                    res_i, operand, axis_flags, funcname, keepdims);
+            if (skip_first_count < 0) {
+                goto fail;
+            }
         }
     }
 
@@ -429,10 +455,25 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
         }
     }
 
-    if (out != NULL) {
+    PyObject *ret;
+    if (nout == 1 && out != NULL) {
         result = out;
     }
-    Py_INCREF(result);
+    if (nout == 1) {
+        Py_INCREF(result);
+        ret = (PyObject *)result;
+    }
+    else {
+        ret = PyTuple_New(nout);
+        if (ret == NULL) {
+            goto fail;
+        }
+        for (int i = 0; i < nout; i++) {
+            PyArrayObject *res_i = NpyIter_GetOperandArray(iter)[i];
+            Py_INCREF(res_i);
+            PyTuple_SET_ITEM(ret, i, (PyObject *)res_i);
+        }
+    }
 
     if (initial_buf != NULL && PyDataType_REFCHK(PyArray_DESCR(result))) {
         PyArray_ClearBuffer(PyArray_DESCR(result), initial_buf, 0, 1, 1);
@@ -440,10 +481,10 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
     PyMem_FREE(initial_buf);
     NPY_AUXDATA_FREE(auxdata);
     if (!NpyIter_Deallocate(iter)) {
-        Py_DECREF(result);
+        Py_DECREF(ret);
         return NULL;
     }
-    return result;
+    return ret;
 
 fail:
     if (initial_buf != NULL && PyDataType_REFCHK(op_dtypes[0])) {
