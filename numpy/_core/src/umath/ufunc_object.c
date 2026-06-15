@@ -5681,9 +5681,13 @@ PyUFunc_RegisterReductionLoop(PyUFuncObject *ufunc,
                               int nin,
                               int nout)
 {
-    if (nout < 2 || nin != nout + 1) {
-        PyErr_SetString(PyExc_ValueError,
-                        "reduction loop requires nout >= 2 and nin == nout + 1");
+    if (ufunc->nout < 2 || nout != ufunc->nout || nin != nout + 1) {
+        PyErr_Format(PyExc_ValueError,
+                     "reduction loop for '%s' must be an (N+1) -> N loop with "
+                     "N == ufunc.nout == %d (so nin == %d, nout == %d, with "
+                     "N >= 2)",
+                     ufunc_get_name_cstr(ufunc), ufunc->nout,
+                     ufunc->nout + 1, ufunc->nout);
         return -1;
     }
     PyUFunc_ReductionLoops *rl = PyArray_malloc(sizeof(*rl));
