@@ -5690,7 +5690,7 @@ PyUFunc_RegisterReductionLoop(PyUFuncObject *ufunc,
                      ufunc->nout + 1, ufunc->nout);
         return -1;
     }
-    PyUFunc_ReductionLoops *rl = PyArray_malloc(sizeof(*rl));
+    PyUFunc_ReductionLoops *rl = PyMem_RawMalloc(sizeof(*rl));
     if (rl == NULL) {
         PyErr_NoMemory();
         return -1;
@@ -5701,7 +5701,7 @@ PyUFunc_RegisterReductionLoop(PyUFuncObject *ufunc,
     rl->ntypes = ntypes;
     rl->nin = nin;
     rl->nout = nout;
-    PyArray_free(ufunc->reduction_loops);
+    PyMem_RawFree(ufunc->reduction_loops);
     ufunc->reduction_loops = rl;
 
     /* Eagerly wrap each signature into an ArrayMethod, mirroring how the
@@ -5749,7 +5749,7 @@ ufunc_dealloc(PyUFuncObject *ufunc)
         PyArrayIdentityHash_Dealloc(ufunc->_dispatch_cache);
     }
     if (ufunc->reduction_loops != NULL) {
-        PyArray_free(ufunc->reduction_loops);
+        PyMem_RawFree(ufunc->reduction_loops);
     }
     Py_XDECREF(ufunc->_reduction_loops);
     PyObject_GC_Del(ufunc);
