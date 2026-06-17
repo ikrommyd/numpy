@@ -176,7 +176,7 @@ PyArray_CopyInitialReduceValues(
  */
 NPY_NO_EXPORT PyObject *
 PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
-        PyArrayObject *operand, PyArrayObject *out, PyArrayObject *wheremask,
+        PyArrayObject *operand, PyArrayObject **out, PyArrayObject *wheremask,
         npy_bool *axis_flags, int keepdims,
         PyObject *initial, PyArray_ReduceLoopFunc *loop,
         npy_intp buffersize, const char *funcname, int errormask)
@@ -197,17 +197,16 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
 
     /* Set up the iterator */
     for (int i = 0; i < nout; i++) {
-        op[i] = NULL;
+        op[i] = out[i];  /* NULL entries are allocated by the iterator */
         op_dtypes[i] = context->descriptors[i];
-    }
-    if (nout == 1) {
-        op[0] = out;
     }
     op[nout] = operand;
     op_dtypes[nout] = context->descriptors[nout];
 
-    /* Buffer to use when we need an initial value */
-    char *initial_buf = NULL;
+    /* Per-output buffer to use when we need an initial value */
+    char *initial_buf[NPY_MAXARGS] = {NULL};
+    /* Owned fast-sequence view of a per-output `initial`, or NULL */
+    PyObject *initial_seq = NULL;
 
     /* More than one axis means multiple orders are possible */
     if (!(context->method->flags & NPY_METH_IS_REORDERABLE)
@@ -277,27 +276,24 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
             curr_axis++;
         }
     }
-    if (out != NULL) {
-        if (NPY_UNLIKELY(nout > 1)) {
-            PyErr_SetString(PyExc_ValueError,
-                        "output parameter cannot be used with reductions "
-                        "that return more than one outputs");
-            goto fail;
+    for (int i = 0; i < nout; i++) {
+        if (op[i] == NULL) {
+            continue;
         }
         /* NpyIter does not raise a good error message in this common case. */
-        if (NPY_UNLIKELY(curr_axis != PyArray_NDIM(out))) {
+        if (NPY_UNLIKELY(curr_axis != PyArray_NDIM(op[i]))) {
             if (keepdims) {
                 PyErr_Format(PyExc_ValueError,
                         "output parameter for reduction operation %s has the "
                         "wrong number of dimensions: Found %d but expected %d "
                         "(must match the operand's when keepdims=True)",
-                        funcname, PyArray_NDIM(out), curr_axis);
+                        funcname, PyArray_NDIM(op[i]), curr_axis);
             }
             else {
                 PyErr_Format(PyExc_ValueError,
                         "output parameter for reduction operation %s has the "
                         "wrong number of dimensions: Found %d but expected %d",
-                        funcname, PyArray_NDIM(out), curr_axis);
+                        funcname, PyArray_NDIM(op[i]), curr_axis);
             }
             goto fail;
         }
@@ -322,21 +318,47 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
      * in any case.  (`np.sum(np.zeros((0, 3)), axis=0)` is a length 3
      * reduction but has an empty result.)
      */
+    /*
+     * A per-output `initial` may be passed as a tuple/list with one entry per
+     * reduction output; a scalar seeds every output.  Single-output reductions
+     * keep their historical behaviour (the value is packed as-is).
+     */
+    if (initial != NULL && initial != Py_None && nout > 1
+            && (PyTuple_Check(initial) || PyList_Check(initial))) {
+        initial_seq = PySequence_Fast(initial, "initial");
+        if (initial_seq == NULL) {
+            goto fail;
+        }
+        if (PySequence_Fast_GET_SIZE(initial_seq) != nout) {
+            PyErr_Format(PyExc_ValueError,
+                    "'initial' must be a scalar or a sequence with one entry "
+                    "per reduction output (%d), got length %zd",
+                    nout, PySequence_Fast_GET_SIZE(initial_seq));
+            goto fail;
+        }
+    }
+
     if ((initial == NULL && context->method->get_reduction_initial == NULL)
             || initial == Py_None) {
         /* There is no initial value, or initial value was explicitly unset */
     }
     else {
         /* Not all functions will need initialization, but init always: */
-        initial_buf = PyMem_Calloc(1, op_dtypes[0]->elsize);
-        if (initial_buf == NULL) {
-            PyErr_NoMemory();
-            goto fail;
+        for (int i = 0; i < nout; i++) {
+            initial_buf[i] = PyMem_Calloc(1, op_dtypes[i]->elsize);
+            if (initial_buf[i] == NULL) {
+                PyErr_NoMemory();
+                goto fail;
+            }
         }
         if (initial != NULL) {
-            /* must use user provided initial value */
-            if (PyArray_Pack(op_dtypes[0], initial_buf, initial) < 0) {
-                goto fail;
+            /* must use user provided initial value(s) */
+            for (int i = 0; i < nout; i++) {
+                PyObject *initial_i = initial_seq != NULL ?
+                        PySequence_Fast_GET_ITEM(initial_seq, i) : initial;
+                if (PyArray_Pack(op_dtypes[i], initial_buf[i], initial_i) < 0) {
+                    goto fail;
+                }
             }
         }
         else {
@@ -344,16 +366,25 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
              * Fetch initial from ArrayMethod, we pretend the reduction is
              * empty when the iteration is.  This may be wrong, but when it is,
              * we will not need the identity as the result is also empty.
+             * The identity seeds output 0 and is broadcast to the rest (the
+             * reduction outputs share a dtype).
              */
             int has_initial = context->method->get_reduction_initial(
-                    context, empty_iteration, initial_buf);
+                    context, empty_iteration, initial_buf[0]);
             if (has_initial < 0) {
                 goto fail;
             }
             if (!has_initial) {
-                /* We have no initial value available, free buffer to indicate */
-                PyMem_FREE(initial_buf);
-                initial_buf = NULL;
+                /* We have no initial value available, free buffers to indicate */
+                for (int i = 0; i < nout; i++) {
+                    PyMem_FREE(initial_buf[i]);
+                    initial_buf[i] = NULL;
+                }
+            }
+            else {
+                for (int i = 1; i < nout; i++) {
+                    memcpy(initial_buf[i], initial_buf[0], op_dtypes[i]->elsize);
+                }
             }
         }
     }
@@ -386,7 +417,7 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
      * Initialize the result to the reduction unit if possible,
      * otherwise copy the initial values and get a view to the rest.
      */
-    if (initial_buf != NULL) {
+    if (initial_buf[0] != NULL) {
         /* Loop provided an identity or default value, assign to result. */
         for (int i = 0; i < nout; i++) {
             PyArrayObject *res_i = NpyIter_GetOperandArray(iter)[i];
@@ -394,7 +425,7 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
                     PyArray_NDIM(res_i), PyArray_DIMS(res_i),
                     PyArray_DESCR(res_i),
                     PyArray_BYTES(res_i), PyArray_STRIDES(res_i),
-                    op_dtypes[i], initial_buf, NPY_UNSAFE_CASTING);
+                    op_dtypes[i], initial_buf[i], NPY_UNSAFE_CASTING);
             if (ret < 0) {
                 goto fail;
             }
@@ -456,8 +487,8 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
     }
 
     PyObject *ret;
-    if (nout == 1 && out != NULL) {
-        result = out;
+    if (nout == 1 && out[0] != NULL) {
+        result = out[0];
     }
     if (nout == 1) {
         Py_INCREF(result);
@@ -475,10 +506,13 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
         }
     }
 
-    if (initial_buf != NULL && PyDataType_REFCHK(PyArray_DESCR(result))) {
-        PyArray_ClearBuffer(PyArray_DESCR(result), initial_buf, 0, 1, 1);
+    for (int i = 0; i < nout; i++) {
+        if (initial_buf[i] != NULL && PyDataType_REFCHK(op_dtypes[i])) {
+            PyArray_ClearBuffer(op_dtypes[i], initial_buf[i], 0, 1, 1);
+        }
+        PyMem_FREE(initial_buf[i]);
     }
-    PyMem_FREE(initial_buf);
+    Py_XDECREF(initial_seq);
     NPY_AUXDATA_FREE(auxdata);
     if (!NpyIter_Deallocate(iter)) {
         Py_DECREF(ret);
@@ -487,10 +521,13 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
     return ret;
 
 fail:
-    if (initial_buf != NULL && PyDataType_REFCHK(op_dtypes[0])) {
-        PyArray_ClearBuffer(op_dtypes[0], initial_buf, 0, 1, 1);
+    for (int i = 0; i < nout; i++) {
+        if (initial_buf[i] != NULL && PyDataType_REFCHK(op_dtypes[i])) {
+            PyArray_ClearBuffer(op_dtypes[i], initial_buf[i], 0, 1, 1);
+        }
+        PyMem_FREE(initial_buf[i]);
     }
-    PyMem_FREE(initial_buf);
+    Py_XDECREF(initial_seq);
     NPY_AUXDATA_FREE(auxdata);
     if (iter != NULL) {
         NpyIter_Deallocate(iter);

@@ -2613,7 +2613,7 @@ static inline int
 try_reduce_contiguous(
         PyArrayMethod_Context *context, PyArrayObject *arr,
         PyArray_Descr *const *descrs,
-        PyArrayObject *out, PyArrayObject *wheremask, PyObject *initial,
+        PyArrayObject **out, PyArrayObject *wheremask, PyObject *initial,
         int ndim, int naxes, int keepdims,
         int errormask,
         PyObject **out_result)
@@ -2623,6 +2623,13 @@ try_reduce_contiguous(
 
     PyArrayMethodObject *ufuncimpl = context->method;
     int nout = ufuncimpl->nout;
+    npy_bool any_out = NPY_FALSE;
+    for (int i = 0; i < nout; i++) {
+        if (out[i] != NULL) {
+            any_out = NPY_TRUE;
+            break;
+        }
+    }
     PyArray_Descr *res_descr = descrs[nout];
     npy_bool descrs_ok = (PyArray_DESCR(arr) == res_descr && !PyDataType_REFCHK(res_descr));
     for (int i = 0; i < nout; i++) {
@@ -2631,7 +2638,7 @@ try_reduce_contiguous(
             break;
         }
     }
-    if (!(out == NULL && wheremask == NULL && initial == NULL && keepdims == 0
+    if (!(!any_out && wheremask == NULL && initial == NULL && keepdims == 0
             && naxes == ndim
             && PyArray_TRIVIALLY_ITERABLE(arr)
             && PyArray_ISALIGNED(arr)
@@ -2768,7 +2775,7 @@ try_reduce_contiguous(
 
 static PyObject *
 PyUFunc_Reduce(PyUFuncObject *ufunc,
-        PyArrayObject *arr, PyArrayObject *out,
+        PyArrayObject *arr, PyArrayObject **out,
         int naxes, int *axes, PyArray_DTypeMeta *signature[3], int keepdims,
         PyObject *initial, PyArrayObject *wheremask)
 {
@@ -2801,7 +2808,7 @@ PyUFunc_Reduce(PyUFuncObject *ufunc,
 
     PyArray_Descr *descrs[NPY_MAXARGS];
     PyArrayMethodObject *ufuncimpl = reducelike_promote_and_resolve(ufunc,
-            arr, out, signature, NPY_FALSE, descrs, NPY_UNSAFE_CASTING, "reduce");
+            arr, out[0], signature, NPY_FALSE, descrs, NPY_UNSAFE_CASTING, "reduce");
     if (ufuncimpl == NULL) {
         return NULL;
     }
@@ -3777,7 +3784,7 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
     PyObject *ret = NULL;
     PyArrayObject *indices = NULL;
     PyArray_DTypeMeta *signature[3] = {NULL, NULL, NULL};
-    PyArrayObject *out = NULL;
+    PyArrayObject *out[NPY_MAXARGS] = {NULL};
     int keepdims = 0;
     PyObject *initial = NULL;
     npy_bool out_is_passed_by_position;
@@ -3891,17 +3898,14 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
 
     /* Normalize output for PyUFunc_CheckOverride and conversion. */
     if (out_is_passed_by_position) {
-        /* in this branch, out is always wrapped in a tuple. */
         if (out_obj == Py_Ellipsis) {
             PyErr_SetString(PyExc_TypeError,
                 "out=... is only allowed as a keyword argument.");
             goto fail;
         }
-        if (out_obj != Py_None) {
-            full_args.out = PyTuple_FromArray(&out_obj, 1);
-            if (full_args.out == NULL) {
-                goto fail;
-            }
+        if (out_obj != Py_None
+                && _set_full_args_out(ufunc->nout, out_obj, &full_args) < 0) {
+            goto fail;
         }
     }
     else if (out_obj) {
@@ -3909,12 +3913,8 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
             out_obj = NULL;
             return_scalar = NPY_FALSE;
         }
-        else if (_set_full_args_out(1, out_obj, &full_args) < 0) {
+        else if (_set_full_args_out(ufunc->nout, out_obj, &full_args) < 0) {
             goto fail;
-        }
-        /* Ensure that out_obj is the array, not the tuple: */
-        if (full_args.out != NULL) {
-            out_obj = PyTuple_GET_ITEM(full_args.out, 0);
         }
     }
 
@@ -3948,8 +3948,12 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
             goto fail;
         }
     }
-    if (out_obj && _set_out_array(out_obj, &out) < 0) {
-        goto fail;
+    if (full_args.out != NULL) {
+        for (int i = 0; i < ufunc->nout; i++) {
+            if (_set_out_array(PyTuple_GET_ITEM(full_args.out, i), &out[i]) < 0) {
+                goto fail;
+            }
+        }
     }
     if (keepdims_obj && !PyArray_PythonPyIntFromInt(keepdims_obj, &keepdims)) {
         goto fail;
@@ -3989,7 +3993,7 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
             goto fail;
         }
         ret = PyUFunc_Accumulate(ufunc,
-                mp, out, axes[0], signature);
+                mp, out[0], axes[0], signature);
         break;
     case UFUNC_REDUCEAT:
         if (ndim == 0) {
@@ -4002,7 +4006,7 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
             goto fail;
         }
         ret = PyUFunc_Reduceat(ufunc,
-                mp, indices, out, axes[0], signature);
+                mp, indices, out[0], axes[0], signature);
         Py_SETREF(indices, NULL);
         break;
     }
@@ -4010,7 +4014,9 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
         goto fail;
     }
 
-    Py_XDECREF(out);
+    for (int i = 0; i < ufunc->nout; i++) {
+        Py_XDECREF(out[i]);
+    }
 
     Py_XDECREF(signature[0]);
     Py_XDECREF(signature[1]);
@@ -4018,12 +4024,12 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
 
     Py_DECREF(mp);
     Py_XDECREF(full_args.in);
-    Py_XDECREF(full_args.out);
 
     /* Wrap and return the output */
     PyObject *wrap, *wrap_type;
     if (npy_find_array_wrap(1, &op, &wrap, &wrap_type) < 0) {
         Py_DECREF(ret);
+        Py_XDECREF(full_args.out);
         return NULL;
     }
 
@@ -4035,37 +4041,47 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
             Py_DECREF(ret);
             Py_DECREF(wrap);
             Py_DECREF(wrap_type);
+            Py_XDECREF(full_args.out);
             return NULL;
         }
         for (Py_ssize_t i = 0; i < n; i++) {
             PyArrayObject *item = (PyArrayObject *)PyTuple_GET_ITEM(ret, i);
+            /* Wrap each output with its own `out` object, if one was given. */
+            PyObject *original_out = full_args.out != NULL ?
+                    PyTuple_GET_ITEM(full_args.out, i) : NULL;
             /* TODO: Data is mutated, so force_wrap like a normal call does */
             PyObject *wrapped_item = npy_apply_wrap(
-                    (PyObject *)item, out_obj, wrap, wrap_type, NULL,
+                    (PyObject *)item, original_out, wrap, wrap_type, NULL,
                     PyArray_NDIM(item) == 0 && return_scalar, NPY_FALSE);
             if (wrapped_item == NULL) {
                 Py_DECREF(wrapped_result);
                 Py_DECREF(ret);
                 Py_DECREF(wrap);
                 Py_DECREF(wrap_type);
+                Py_XDECREF(full_args.out);
                 return NULL;
             }
             PyTuple_SET_ITEM(wrapped_result, i, wrapped_item);
         }
     }
     else {
+        PyObject *original_out = full_args.out != NULL ?
+                PyTuple_GET_ITEM(full_args.out, 0) : NULL;
         /* TODO: Data is mutated, so force_wrap like a normal ufunc call does */
         wrapped_result = npy_apply_wrap(
-                ret, out_obj, wrap, wrap_type, NULL,
+                ret, original_out, wrap, wrap_type, NULL,
                 PyArray_NDIM((PyArrayObject *)ret) == 0 && return_scalar, NPY_FALSE);
     }
     Py_DECREF(ret);
     Py_DECREF(wrap);
     Py_DECREF(wrap_type);
+    Py_XDECREF(full_args.out);
     return wrapped_result;
 
 fail:
-    Py_XDECREF(out);
+    for (int i = 0; i < ufunc->nout; i++) {
+        Py_XDECREF(out[i]);
+    }
 
     Py_XDECREF(signature[0]);
     Py_XDECREF(signature[1]);
