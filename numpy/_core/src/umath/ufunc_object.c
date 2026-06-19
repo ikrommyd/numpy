@@ -2295,9 +2295,9 @@ PyUFunc_GenericFunctionInternal(PyUFuncObject *ufunc,
  */
 static PyArrayMethodObject *
 reducelike_promote_and_resolve(PyUFuncObject *ufunc,
-        PyArrayObject *arr, PyArrayObject *out,
-        PyArray_DTypeMeta *signature[3],
-        npy_bool enforce_uniform_args, PyArray_Descr *out_descrs[3],
+        PyArrayObject *arr, PyArrayObject *const out[],
+        PyArray_DTypeMeta *signature[],
+        npy_bool enforce_uniform_args, PyArray_Descr *out_descrs[],
         NPY_CASTING casting, char *method)
 {
      /*
@@ -2306,80 +2306,7 @@ reducelike_promote_and_resolve(PyUFuncObject *ufunc,
       *
       * TODO: The following should be handled by a promoter!
       */
-    if (ufunc->nout >= 2) {
-        PyUFunc_ReductionLoops *rl = ufunc->reduction_loops;
-        if (rl == NULL || ufunc->_reduction_loops == NULL) {
-            PyErr_Format(PyExc_TypeError,
-                    "%s is not supported for the ufunc %s as it has "
-                    "no registered reduction loops", method, ufunc_get_name_cstr(ufunc));
-            return NULL;
-        }
-        int nargs = rl->nin + rl->nout;
-        int stream_idx = rl->nin - 1;  /* last input is the streamed element */
-        PyArray_Descr *arr_descr = PyArray_DESCR(arr);
-        int in_typenum = arr_descr->type_num;
-
-        int best = -1;
-        const char *types;
-        types = rl->types;
-        for (int row = 0; row < rl->ntypes; row++, types += nargs) {
-            if ((int)(unsigned char)types[stream_idx] == in_typenum) {
-                best = row;
-                break;
-            }
-        }
-        if (best < 0) {
-            types = rl->types;
-            for (int row = 0; row < rl->ntypes; row++, types += nargs) {
-                if (PyArray_CanCastSafely(in_typenum, (int)(unsigned char)types[stream_idx])) {
-                    best = row;
-                    break;
-                }
-            }
-        }
-        if (best < 0) {
-            PyErr_Format(PyExc_ValueError,
-                    "%s does not support reduction over input type %s",
-                    ufunc_get_name_cstr(ufunc), arr_descr->typeobj->tp_name);
-            return NULL;
-        }
-
-        const char *row_types = rl->types + (size_t)best * nargs;
-
-        PyArray_DTypeMeta *resolved_signature[NPY_MAXARGS];
-        for (int i = 0; i < nargs; i++) {
-            resolved_signature[i] = PyArray_DTypeFromTypeNum((int)(unsigned char)row_types[i]);
-            Py_DECREF(resolved_signature[i]);
-        }
-        PyObject *rkey = PyArray_TupleFromItems(nargs, (PyObject **)resolved_signature, 0);
-        if (rkey == NULL) {
-            return NULL;
-        }
-        PyObject *rinfo = PyDict_GetItemWithError(ufunc->_reduction_loops, rkey);
-        Py_DECREF(rkey);
-        if (rinfo == NULL) {
-            if (!PyErr_Occurred()) {
-                PyErr_Format(PyExc_RuntimeError,
-                        "the reduction loop for ufunc %s and type %s "
-                        "appears to not be wrapped",
-                        ufunc_get_name_cstr(ufunc), arr_descr->typeobj->tp_name);
-            }
-            return NULL;
-        }
-        PyArrayMethodObject *rimpl = (PyArrayMethodObject *)PyTuple_GET_ITEM(rinfo, 1);
-
-        for (int i = 0; i < nargs; i++) {
-            out_descrs[i] = PyArray_DescrFromType((int)(unsigned char)row_types[i]);
-            if (out_descrs[i] == NULL) {
-                for (int j = 0; j < i; j++) {
-                    Py_CLEAR(out_descrs[j]);
-                }
-                return NULL;
-            }
-        }
-        return rimpl;
-    }
-    if (signature[0] == NULL && out == NULL) {
+    if (signature[0] == NULL && out[0] == NULL) {
         /*
          * For integer types --- make sure at least a long
          * is used for add and multiply reduction to avoid overflow
@@ -2402,16 +2329,24 @@ reducelike_promote_and_resolve(PyUFuncObject *ufunc,
             signature[0] = PyArray_DTypeFromTypeNum(typenum);
         }
     }
-    assert(signature[2] == NULL);  /* we always fill it here */
-    Py_XINCREF(signature[0]);
-    signature[2] = signature[0];
+
+    int nout = ufunc->nout;
+    int stream = nout;          /* index of the streamed input */
+    int rnargs = 2 * nout + 1;  /* N accumulators + stream + N outputs */
+
+    for (int i = 0; i < nout; i++) {
+        assert(signature[stream + 1 + i] == NULL);  /* we always fill it here */
+        Py_XINCREF(signature[i]);
+        signature[stream + 1 + i] = signature[i];
+    }
 
     /*
      * Note that the `ops` is not really correct.  But legacy resolution
      * cannot quite handle the correct ops (e.g. a NULL first item if `out`
      * is NULL) so we pass `arr` instead in that case.
      */
-    PyArrayObject *ops[3] = {out ? out : arr, arr, out};
+    PyArrayObject *ops[NPY_MAXARGS];
+    PyArray_DTypeMeta *operation_DTypes[NPY_MAXARGS] = {NULL};
 
     /*
      * TODO: If `out` is not provided, arguably `initial` could define
@@ -2420,25 +2355,29 @@ reducelike_promote_and_resolve(PyUFuncObject *ufunc,
      *       value.  As of 1.20, it returned an integer, so that should
      *       probably go to an error/warning first.
      */
-    PyArray_DTypeMeta *operation_DTypes[3] = {
-            NULL, NPY_DTYPE(PyArray_DESCR(arr)), NULL};
-    Py_INCREF(operation_DTypes[1]);
-
-    if (out != NULL) {
-        operation_DTypes[0] = NPY_DTYPE(PyArray_DESCR(out));
-        Py_INCREF(operation_DTypes[0]);
-        operation_DTypes[2] = operation_DTypes[0];
-        Py_INCREF(operation_DTypes[2]);
+    for (int i = 0; i < nout; i++) {
+        PyArrayObject *o = out[i];
+        ops[i] = o ? o : arr;
+        ops[stream + 1 + i] = o;
+        if (o != NULL) {
+            operation_DTypes[i] = NPY_DTYPE(PyArray_DESCR(o));
+            Py_INCREF(operation_DTypes[i]);
+            operation_DTypes[stream + 1 + i] = operation_DTypes[i];
+            Py_INCREF(operation_DTypes[stream + 1 + i]);
+        }
     }
+    ops[stream] = arr;
+    operation_DTypes[stream] = NPY_DTYPE(PyArray_DESCR(arr));
+    Py_INCREF(operation_DTypes[stream]);
 
     PyArrayMethodObject *ufuncimpl = promote_and_get_ufuncimpl(ufunc,
             ops, signature, operation_DTypes, NPY_FALSE, NPY_FALSE, NPY_TRUE);
 
     if (ufuncimpl == NULL) {
         /* DTypes may currently get filled in fallbacks and XDECREF for error: */
-        Py_XDECREF(operation_DTypes[0]);
-        Py_XDECREF(operation_DTypes[1]);
-        Py_XDECREF(operation_DTypes[2]);
+        for (int i = 0; i < rnargs; i++) {
+            Py_XDECREF(operation_DTypes[i]);
+        }
         return NULL;
     }
 
@@ -2449,12 +2388,12 @@ reducelike_promote_and_resolve(PyUFuncObject *ufunc,
      * casting safety could in principle be set to the default same-kind.
      * (although this should possibly happen through a deprecation)
      */
-    int res = resolve_descriptors(3, ufunc, ufuncimpl,
+    int res = resolve_descriptors(rnargs, ufunc, ufuncimpl,
             ops, out_descrs, signature, operation_DTypes, NULL, casting);
 
-    Py_XDECREF(operation_DTypes[0]);
-    Py_XDECREF(operation_DTypes[1]);
-    Py_XDECREF(operation_DTypes[2]);
+    for (int i = 0; i < rnargs; i++) {
+        Py_XDECREF(operation_DTypes[i]);
+    }
     if (res < 0) {
         return NULL;
     }
@@ -2467,22 +2406,24 @@ reducelike_promote_and_resolve(PyUFuncObject *ufunc,
      * not enforce this here strictly.  Otherwise correct handling of
      * byte-order changes (or metadata) requires a lot of care; see gh-20699.
      */
-    if (!PyArray_EquivTypes(out_descrs[0], out_descrs[2]) || (
-            enforce_uniform_args && !PyArray_EquivTypes(
-                    out_descrs[0], out_descrs[1]))) {
-        PyErr_Format(PyExc_TypeError,
-                "the resolved dtypes are not compatible with %s.%s. "
-                "Resolved (%R, %R, %R)",
-                ufunc_get_name_cstr(ufunc), method,
-                out_descrs[0], out_descrs[1], out_descrs[2]);
-        goto fail;
+    for (int i = 0; i < nout; i++) {
+        if (!PyArray_EquivTypes(out_descrs[i], out_descrs[stream + 1 + i]) || (
+                enforce_uniform_args && !PyArray_EquivTypes(
+                        out_descrs[i], out_descrs[stream]))) {
+            PyErr_Format(PyExc_TypeError,
+                    "the resolved dtypes are not compatible with %s.%s. "
+                    "Resolved (%R, %R, %R)",
+                    ufunc_get_name_cstr(ufunc), method,
+                    out_descrs[i], out_descrs[stream], out_descrs[stream + 1 + i]);
+            goto fail;
+        }
+        /*
+         * After checking that they are equivalent, we enforce the use of the out
+         * one (which the user should have defined).  (Needed by string dtype)
+         */
+        Py_INCREF(out_descrs[stream + 1 + i]);
+        Py_SETREF(out_descrs[i], out_descrs[stream + 1 + i]);
     }
-    /*
-     * After checking that they are equivalent, we enforce the use of the out
-     * one (which the user should have defined).  (Needed by string dtype)
-     */
-    Py_INCREF(out_descrs[2]);
-    Py_SETREF(out_descrs[0], out_descrs[2]);
 
     /* TODO: This really should _not_ be unsafe casting (same above)! */
     if (validate_casting(ufuncimpl, ufunc, ops, out_descrs, casting) < 0) {
@@ -2492,7 +2433,7 @@ reducelike_promote_and_resolve(PyUFuncObject *ufunc,
     return ufuncimpl;
 
   fail:
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < rnargs; ++i) {
         Py_CLEAR(out_descrs[i]);
     }
     return NULL;
@@ -2776,7 +2717,7 @@ try_reduce_contiguous(
 static PyObject *
 PyUFunc_Reduce(PyUFuncObject *ufunc,
         PyArrayObject *arr, PyArrayObject **out,
-        int naxes, int *axes, PyArray_DTypeMeta *signature[3], int keepdims,
+        int naxes, int *axes, PyArray_DTypeMeta *signature[], int keepdims,
         PyObject *initial, PyArrayObject *wheremask)
 {
     int iaxes, ndim;
@@ -2808,7 +2749,7 @@ PyUFunc_Reduce(PyUFuncObject *ufunc,
 
     PyArray_Descr *descrs[NPY_MAXARGS];
     PyArrayMethodObject *ufuncimpl = reducelike_promote_and_resolve(ufunc,
-            arr, out[0], signature, NPY_FALSE, descrs, NPY_UNSAFE_CASTING, "reduce");
+            arr, out, signature, NPY_FALSE, descrs, NPY_UNSAFE_CASTING, "reduce");
     if (ufuncimpl == NULL) {
         return NULL;
     }
@@ -2883,7 +2824,7 @@ PyUFunc_Accumulate(PyUFuncObject *ufunc, PyArrayObject *arr, PyArrayObject *out,
 
     PyArray_Descr *descrs[3];
     PyArrayMethodObject *ufuncimpl = reducelike_promote_and_resolve(ufunc,
-            arr, out, signature, NPY_TRUE, descrs, NPY_UNSAFE_CASTING,
+            arr, &out, signature, NPY_TRUE, descrs, NPY_UNSAFE_CASTING,
             "accumulate");
     if (ufuncimpl == NULL) {
         return NULL;
@@ -3306,7 +3247,7 @@ PyUFunc_Reduceat(PyUFuncObject *ufunc, PyArrayObject *arr, PyArrayObject *ind,
 
     PyArray_Descr *descrs[3];
     PyArrayMethodObject *ufuncimpl = reducelike_promote_and_resolve(ufunc,
-            arr, out, signature, NPY_TRUE, descrs, NPY_UNSAFE_CASTING,
+            arr, &out, signature, NPY_TRUE, descrs, NPY_UNSAFE_CASTING,
             "reduceat");
     if (ufuncimpl == NULL) {
         return NULL;
@@ -3783,7 +3724,7 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
     PyObject *op = NULL;
     PyObject *ret = NULL;
     PyArrayObject *indices = NULL;
-    PyArray_DTypeMeta *signature[3] = {NULL, NULL, NULL};
+    PyArray_DTypeMeta *signature[NPY_MAXARGS] = {NULL};
     PyArrayObject *out[NPY_MAXARGS] = {NULL};
     int keepdims = 0;
     PyObject *initial = NULL;
@@ -4018,9 +3959,9 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
         Py_XDECREF(out[i]);
     }
 
-    Py_XDECREF(signature[0]);
-    Py_XDECREF(signature[1]);
-    Py_XDECREF(signature[2]);
+    for (int i = 0; i < NPY_MAXARGS; i++) {
+        Py_XDECREF(signature[i]);
+    }
 
     Py_DECREF(mp);
     Py_XDECREF(full_args.in);
@@ -4083,9 +4024,9 @@ fail:
         Py_XDECREF(out[i]);
     }
 
-    Py_XDECREF(signature[0]);
-    Py_XDECREF(signature[1]);
-    Py_XDECREF(signature[2]);
+    for (int i = 0; i < NPY_MAXARGS; i++) {
+        Py_XDECREF(signature[i]);
+    }
 
     Py_XDECREF(mp);
     Py_XDECREF(wheremask);
@@ -6760,7 +6701,7 @@ py_resolve_dtypes_generic(PyUFuncObject *ufunc, npy_bool return_context,
         }
 
         ufuncimpl = reducelike_promote_and_resolve(ufunc,
-                dummy_arrays[1], dummy_arrays[0], signature, NPY_FALSE,
+                dummy_arrays[1], &dummy_arrays[0], signature, NPY_FALSE,
                 operation_descrs, casting, "resolve_dtypes");
 
         if (ufuncimpl == NULL) {

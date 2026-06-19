@@ -60,9 +60,40 @@
 #define PROMOTION_DEBUG_TRACING 0
 
 
+/* Loop table and operative arity the dispatch engine resolves against. */
+typedef struct {
+    PyObject *loops;
+    PyArrayIdentityHash *cache;  /* may be NULL to skip caching */
+    int nin;
+    int nargs;
+} ufunc_dispatch_target;
+
+static inline ufunc_dispatch_target
+elementwise_target(PyUFuncObject *ufunc)
+{
+    ufunc_dispatch_target target;
+    target.loops = ufunc->_loops;
+    target.cache = (PyArrayIdentityHash *)ufunc->_dispatch_cache;
+    target.nin = ufunc->nin;
+    target.nargs = ufunc->nargs;
+    return target;
+}
+
+static inline ufunc_dispatch_target
+reduction_target(PyUFuncObject *ufunc)
+{
+    ufunc_dispatch_target target;
+    target.loops = ufunc->_reduction_loops;
+    target.cache = NULL;  /* small table, resolved rarely: no caching */
+    target.nin = ufunc->reduction_loops->nin;
+    target.nargs = ufunc->reduction_loops->nin + ufunc->reduction_loops->nout;
+    return target;
+}
+
 /* forward declaration */
 static inline PyObject *
 promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
+        const ufunc_dispatch_target *target,
         PyArrayObject *const ops[],
         PyArray_DTypeMeta *signature[],
         PyArray_DTypeMeta *op_dtypes[],
@@ -306,13 +337,14 @@ PyUFunc_AddLoopsFromSpecs(PyUFunc_LoopSlot *slots)
  */
 static int
 resolve_implementation_info(PyUFuncObject *ufunc,
+        const ufunc_dispatch_target *target,
         PyArray_DTypeMeta *op_dtypes[], npy_bool only_promoters,
         PyObject **out_info)
 {
-    int nin = ufunc->nin, nargs = ufunc->nargs;
+    int nin = target->nin, nargs = target->nargs;
     int ret = -1;
     /* PyDict_Values returns a snapshot, safe against concurrent additions. */
-    PyObject *loops = PyDict_Values(ufunc->_loops);
+    PyObject *loops = PyDict_Values(target->loops);
     if (loops == NULL) {
         return -1;
     }
@@ -324,7 +356,7 @@ resolve_implementation_info(PyUFuncObject *ufunc,
     printf("Promoting for '%s' promoters only: %d\n",
             ufunc->name ? ufunc->name : "<unknown>", (int)only_promoters);
     printf("    DTypes: ");
-    PyObject *tmp = PyArray_TupleFromItems(ufunc->nargs, op_dtypes, 1);
+    PyObject *tmp = PyArray_TupleFromItems(nargs, op_dtypes, 1);
     PyObject_Print(tmp, stdout, 0);
     Py_DECREF(tmp);
     printf("\n");
@@ -363,7 +395,6 @@ resolve_implementation_info(PyUFuncObject *ufunc,
                     /* Unspecified out always matches (see below for inputs) */
                     continue;
                 }
-                assert(i == 0);
                 /*
                  * This is a reduce-like operation, we enforce that these
                  * register with None as the first DType.  If a reduction
@@ -371,7 +402,7 @@ resolve_implementation_info(PyUFuncObject *ufunc,
                  * A `(res_DType, op_DType, res_DType)` pattern can make sense
                  * in other context as well and could be confusing.
                  */
-                if (PyTuple_GET_ITEM(curr_dtypes, 0) == Py_None) {
+                if (PyTuple_GET_ITEM(curr_dtypes, i) == Py_None) {
                     continue;
                 }
                 /* Otherwise, this is not considered a match */
@@ -424,7 +455,7 @@ resolve_implementation_info(PyUFuncObject *ufunc,
              * necessary to compare to two "best" cases.
              */
             for (Py_ssize_t i = 0; i < nargs; i++) {
-                if (i == ufunc->nin && current_best != -1) {
+                if (i == nin && current_best != -1) {
                     /* inputs prefer one loop and outputs have lower priority */
                     break;
                 }
@@ -525,7 +556,7 @@ resolve_implementation_info(PyUFuncObject *ufunc,
                  */
                 if (!only_promoters) {
                     ret = resolve_implementation_info(
-                            ufunc, op_dtypes, NPY_TRUE, out_info);
+                            ufunc, target, op_dtypes, NPY_TRUE, out_info);
                     goto finish;
                 }
                 /*
@@ -535,7 +566,7 @@ resolve_implementation_info(PyUFuncObject *ufunc,
                  * and we still do a legacy lookup later.)
                  */
                 PyObject *given = PyArray_TupleFromItems(
-                        ufunc->nargs, (PyObject **)op_dtypes, 1);
+                        nargs, (PyObject **)op_dtypes, 1);
                 if (given != NULL) {
                     PyErr_Format(PyExc_RuntimeError,
                             "Could not find a loop for the inputs:\n    %S\n"
@@ -582,11 +613,12 @@ finish:
  * those defined by the `signature` unmodified).
  */
 static PyObject *
-call_promoter_and_recurse(PyUFuncObject *ufunc, PyObject *info,
+call_promoter_and_recurse(PyUFuncObject *ufunc,
+        const ufunc_dispatch_target *target, PyObject *info,
         PyArray_DTypeMeta *op_dtypes[], PyArray_DTypeMeta *signature[],
         PyArrayObject *const operands[])
 {
-    int nargs = ufunc->nargs;
+    int nin = target->nin, nargs = target->nargs;
     PyObject *resolved_info = NULL;
 
     int promoter_result;
@@ -633,10 +665,13 @@ call_promoter_and_recurse(PyUFuncObject *ufunc, PyObject *info,
     }
     else {
         /* Reduction special path */
-        new_op_dtypes[0] = NPY_DT_NewRef(op_dtypes[1]);
-        new_op_dtypes[1] = NPY_DT_NewRef(op_dtypes[1]);
-        Py_XINCREF(op_dtypes[2]);
-        new_op_dtypes[2] = op_dtypes[2];
+        for (int i = 0; i < nin; i++) {
+            new_op_dtypes[i] = NPY_DT_NewRef(op_dtypes[nin - 1]);
+        }
+        for (int i = nin; i < nargs; i++) {
+            Py_XINCREF(op_dtypes[i]);
+            new_op_dtypes[i] = op_dtypes[i];
+        }
     }
 
     /*
@@ -646,7 +681,7 @@ call_promoter_and_recurse(PyUFuncObject *ufunc, PyObject *info,
     if (Py_EnterRecursiveCall(" during ufunc promotion.") != 0) {
         goto finish;
     }
-    resolved_info = promote_and_get_info_and_ufuncimpl(ufunc,
+    resolved_info = promote_and_get_info_and_ufuncimpl(ufunc, target,
             operands, signature, new_op_dtypes,
             /* no legacy promotion */ NPY_FALSE);
 
@@ -894,6 +929,7 @@ add_and_return_reduction_wrapping_loop(PyUFuncObject *ufunc,
  */
 static inline PyObject *
 promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
+        const ufunc_dispatch_target *target,
         PyArrayObject *const ops[],
         PyArray_DTypeMeta *signature[],
         PyArray_DTypeMeta *op_dtypes[],
@@ -907,13 +943,15 @@ promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
      * 2. Check all registered loops/promoters to find the best match.
      * 3. Fall back to the legacy implementation if no match was found.
      */
-    PyObject *info = PyArrayIdentityHash_GetItem(
-            (PyArrayIdentityHash *)ufunc->_dispatch_cache,
-            (PyObject **)op_dtypes);
-    if (info != NULL && PyObject_TypeCheck(
-            PyTuple_GET_ITEM(info, 1), &PyArrayMethod_Type)) {
-        /* Found the ArrayMethod and NOT a promoter: return it */
-        return info;
+    PyObject *info = NULL;
+    if (target->cache != NULL) {
+        info = PyArrayIdentityHash_GetItem(target->cache,
+                (PyObject **)op_dtypes);
+        if (info != NULL && PyObject_TypeCheck(
+                PyTuple_GET_ITEM(info, 1), &PyArrayMethod_Type)) {
+            /* Found the ArrayMethod and NOT a promoter: return it */
+            return info;
+        }
     }
 
     /*
@@ -921,19 +959,21 @@ promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
      * in `resolve_implementation_info` (which caches its result on success).
      */
     if (info == NULL) {
-        if (resolve_implementation_info(ufunc,
+        if (resolve_implementation_info(ufunc, target,
                 op_dtypes, NPY_FALSE, &info) < 0) {
             return NULL;
         }
         if (info != NULL && PyObject_TypeCheck(
                 PyTuple_GET_ITEM(info, 1), &PyArrayMethod_Type)) {
+            if (target->cache == NULL) {
+                return info;
+            }
             /*
              * Found the ArrayMethod and NOT promoter.  Before returning it
              * add it to the cache for faster lookup in the future.
              */
             PyObject *result = NULL;
-            if (PyArrayIdentityHash_SetItemDefault(
-                        (PyArrayIdentityHash *)ufunc->_dispatch_cache,
+            if (PyArrayIdentityHash_SetItemDefault(target->cache,
                         (PyObject **)op_dtypes, info, &result) < 0) {
                 return NULL;
             }
@@ -948,16 +988,18 @@ promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
      *       it is a True fallback (not registered so lowest priority)
      */
     if (info != NULL || op_dtypes[0] == NULL) {
-        info = call_promoter_and_recurse(ufunc,
+        info = call_promoter_and_recurse(ufunc, target,
                 info, op_dtypes, signature, ops);
         if (info == NULL && PyErr_Occurred()) {
             return NULL;
         }
         else if (info != NULL) {
+            if (target->cache == NULL) {
+                return info;
+            }
             /* Add result to the cache using the original types: */
             PyObject *result = NULL;
-            if (PyArrayIdentityHash_SetItemDefault(
-                        (PyArrayIdentityHash *)ufunc->_dispatch_cache,
+            if (PyArrayIdentityHash_SetItemDefault(target->cache,
                         (PyObject **)op_dtypes, info, &result) < 0) {
                 return NULL;
             }
@@ -971,7 +1013,8 @@ promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
      * However, we need to give the legacy implementation a chance here.
      * (it will modify `op_dtypes`).
      */
-    if (!legacy_promotion_is_possible || ufunc->type_resolver == NULL ||
+    if (target->loops != ufunc->_loops || !legacy_promotion_is_possible ||
+            ufunc->type_resolver == NULL ||
             (ufunc->ntypes == 0 && ufunc->userloops == NULL)) {
         /* Already tried or not a "legacy" ufunc (no loop found, return) */
         return NULL;
@@ -983,7 +1026,7 @@ promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
             ops, signature, new_op_dtypes, &cacheable, NPY_FALSE) < 0) {
         return NULL;
     }
-    info = promote_and_get_info_and_ufuncimpl(ufunc,
+    info = promote_and_get_info_and_ufuncimpl(ufunc, target,
             ops, signature, new_op_dtypes, NPY_FALSE);
     if (info == NULL) {
         /*
@@ -1029,7 +1072,7 @@ promote_and_get_info_and_ufuncimpl(PyUFuncObject *ufunc,
     if (cacheable) {
         PyObject *result = NULL;
         /* Add this to the cache using the original types: */
-        if (PyArrayIdentityHash_SetItemDefault((PyArrayIdentityHash *)ufunc->_dispatch_cache,
+        if (PyArrayIdentityHash_SetItemDefault(target->cache,
                 (PyObject **)op_dtypes, info, &result) < 0) {
             return NULL;
         }
@@ -1087,7 +1130,12 @@ promote_and_get_ufuncimpl(PyUFuncObject *ufunc,
         npy_bool promoting_pyscalars,
         npy_bool ensure_reduce_compatible)
 {
-    int nin = ufunc->nin, nargs = ufunc->nargs;
+    /* Multi-output reductions resolve against the separate reduction table. */
+    npy_bool use_reduction_loops =
+            ensure_reduce_compatible && ufunc->reduction_loops != NULL;
+    ufunc_dispatch_target target = use_reduction_loops ?
+            reduction_target(ufunc) : elementwise_target(ufunc);
+    int nin = target.nin, nargs = target.nargs;
     npy_bool legacy_promotion_is_possible = NPY_TRUE;
     PyObject *all_dtypes = NULL;
     PyArrayMethodObject *method = NULL;
@@ -1104,7 +1152,7 @@ promote_and_get_ufuncimpl(PyUFuncObject *ufunc,
              */
             Py_INCREF(signature[i]);
             Py_XSETREF(op_dtypes[i], signature[i]);
-            assert(i >= ufunc->nin || !NPY_DT_is_abstract(signature[i]));
+            assert(i >= nin || !NPY_DT_is_abstract(signature[i]));
         }
         else if (i >= nin) {
             /*
@@ -1126,7 +1174,7 @@ promote_and_get_ufuncimpl(PyUFuncObject *ufunc,
         }
     }
 
-    PyObject *info = promote_and_get_info_and_ufuncimpl(ufunc,
+    PyObject *info = promote_and_get_info_and_ufuncimpl(ufunc, &target,
             ops, signature, op_dtypes, legacy_promotion_is_possible);
 
     if (info == NULL) {
@@ -1146,7 +1194,7 @@ promote_and_get_ufuncimpl(PyUFuncObject *ufunc,
      *       comment.  That could be relaxed, in which case we may need to
      *       cache if a call was for a reduction.
      */
-    if (ensure_reduce_compatible && signature[0] == NULL &&
+    if (!use_reduction_loops && ensure_reduce_compatible && signature[0] == NULL &&
             PyTuple_GET_ITEM(all_dtypes, 0) != PyTuple_GET_ITEM(all_dtypes, 2)) {
         signature[0] = (PyArray_DTypeMeta *)PyTuple_GET_ITEM(all_dtypes, 2);
         Py_INCREF(signature[0]);
@@ -1174,7 +1222,15 @@ promote_and_get_ufuncimpl(PyUFuncObject *ufunc,
 
   handle_error:
     /* We only set the "no loop found error here" */
-    if (!PyErr_Occurred()) {
+    if (use_reduction_loops && !PyErr_Occurred()) {
+        /* The generic no-loop error cannot describe an (N+1)->N reduction. */
+        PyArray_DTypeMeta *stream = op_dtypes[nin - 1];
+        PyErr_Format(PyExc_ValueError,
+                "%s does not support reduction over input type %s",
+                ufunc_get_name_cstr(ufunc),
+                stream->singleton->typeobj->tp_name);
+    }
+    else if (!PyErr_Occurred()) {
         raise_no_loop_found_error(ufunc, (PyObject **)op_dtypes);
     }
     /*
