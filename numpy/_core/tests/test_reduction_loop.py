@@ -377,17 +377,70 @@ class TestReductionLoop:
         with pytest.raises(ValueError, match="mismatch in size"):
             mm.reduce(a, dtype=(np.int32, np.int64))
 
-    def test_accumulate_raises(self):
-        a = make_array((4,), seed=20)
-        with pytest.raises(
-                ValueError, match="only supported for functions returning a single"):
-            mm.accumulate(a)
+    @pytest.mark.parametrize("shape", SHAPES, ids=str)
+    def test_accumulate(self, shape):
+        a = make_array(shape, seed=20)
+        for axis in range(a.ndim):
+            got_min, got_max = mm.accumulate(a, axis=axis)
+            np.testing.assert_array_equal(
+                got_min, np.minimum.accumulate(a, axis=axis))
+            np.testing.assert_array_equal(
+                got_max, np.maximum.accumulate(a, axis=axis))
 
-    def test_reduceat_raises(self):
-        a = make_array((4,), seed=21)
-        with pytest.raises(
-                ValueError, match="only supported for functions returning a single"):
-            mm.reduceat(a, [0, 2])
+    def test_accumulate_returns_tuple(self):
+        a = make_array((5,), seed=20)
+        result = mm.accumulate(a)
+        assert isinstance(result, tuple) and len(result) == 2
+
+    def test_accumulate_out_tuple(self):
+        a = make_array((6,), seed=20)
+        omin = np.empty(6, np.float64)
+        omax = np.empty(6, np.float64)
+        got_min, got_max = mm.accumulate(a, out=(omin, omax))
+        assert got_min is omin and got_max is omax
+        np.testing.assert_array_equal(omin, np.minimum.accumulate(a))
+        np.testing.assert_array_equal(omax, np.maximum.accumulate(a))
+
+    def test_accumulate_strided(self):
+        a = make_array((12,), seed=20)[::-1]
+        got_min, got_max = mm.accumulate(a)
+        np.testing.assert_array_equal(got_min, np.minimum.accumulate(a))
+        np.testing.assert_array_equal(got_max, np.maximum.accumulate(a))
+
+    @pytest.mark.parametrize("shape", SHAPES, ids=str)
+    def test_reduceat(self, shape):
+        a = make_array(shape, seed=21)
+        for axis in range(a.ndim):
+            idx = [0] if shape[axis] == 1 else [0, shape[axis] // 2]
+            got_min, got_max = mm.reduceat(a, idx, axis=axis)
+            np.testing.assert_array_equal(
+                got_min, np.minimum.reduceat(a, idx, axis=axis))
+            np.testing.assert_array_equal(
+                got_max, np.maximum.reduceat(a, idx, axis=axis))
+
+    def test_reduceat_returns_tuple(self):
+        a = make_array((6,), seed=21)
+        result = mm.reduceat(a, [0, 3])
+        assert isinstance(result, tuple) and len(result) == 2
+
+    def test_reduceat_out_tuple(self):
+        a = make_array((8,), seed=21)
+        idx = [0, 2, 5]
+        omin = np.empty(len(idx), np.float64)
+        omax = np.empty(len(idx), np.float64)
+        got_min, got_max = mm.reduceat(a, idx, out=(omin, omax))
+        assert got_min is omin and got_max is omax
+        np.testing.assert_array_equal(omin, np.minimum.reduceat(a, idx))
+        np.testing.assert_array_equal(omax, np.maximum.reduceat(a, idx))
+
+    def test_accumulate_identity_ignored(self):
+        # accumulate always seeds with the first element, so a registered
+        # identity must not change the result.
+        a = make_array((10,), seed=25)
+        a_mn, a_mx = mm.accumulate(a)
+        i_mn, i_mx = mmi.accumulate(a)
+        np.testing.assert_array_equal(a_mn, i_mn)
+        np.testing.assert_array_equal(a_mx, i_mx)
 
     def test_at_raises(self):
         a = make_array((4,), seed=22)
