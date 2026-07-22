@@ -846,12 +846,44 @@ _umath_tests_mtargets = mod_features.multi_targets(
   dependencies: [py_dep, np_core_dep]
 )
 
+# Benchmark-only fused min/max, built with the same CPU dispatch as the
+# `np.minimum`/`np.maximum` loops so the two can be compared at equal effort.
+_minmax_bench_mtargets = mod_features.multi_targets(
+  '_minmax_bench.dispatch.h',
+  'src/umath/_minmax_bench.dispatch.c',
+  dispatch: [
+    ASIMD, NEON,
+    X86_V4, X86_V3, X86_V2,
+    VSX2,
+    VXE, VX,
+    LSX,
+  ],
+  baseline: CPU_BASELINE,
+  prefix: 'NPY_',
+  dependencies: [py_dep, np_core_dep],
+  c_args: c_args_common + max_opt,
+  include_directories: [
+    'include',
+    'src/common',
+    'src/multiarray',
+    'src/npymath',
+    'src/umath',
+    'src/highway',
+  ]
+)
+
 test_modules_src = [
   ['_umath_tests', [
       src_file.process('src/umath/_umath_tests.c.src'),
       'src/common/npy_cpu_features.c',
     ],
     _umath_tests_mtargets.static_lib('_umath_tests_mtargets')
+  ],
+  ['_minmax_bench', [
+      'src/umath/_minmax_bench.c',
+      'src/common/npy_cpu_features.c',
+    ],
+    _minmax_bench_mtargets.static_lib('_minmax_bench_mtargets')
   ],
   ['_rational_tests', 'src/umath/_rational_tests.c', []],
   ['_struct_ufunc_tests', 'src/umath/_struct_ufunc_tests.c', []],
