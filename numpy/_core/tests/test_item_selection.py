@@ -176,3 +176,19 @@ class TestPut:
         # Allowing empty values like this is weird...
         np.put(arr, [1, 2, 3], [])
         assert_array_equal(arr, arr_copy)
+
+    @pytest.mark.parametrize("dtype", np.typecodes["AllInteger"])
+    def test_index_integer_dtypes(self, dtype):
+        # np.put matches ``a.flat[ind] = v`` for any integer index dtype
+        indices = np.array([1, 3], dtype=dtype)
+
+        arr = np.zeros(5, dtype=np.int64)
+        np.put(arr, indices, [7, 9])
+
+        expected = np.zeros(5, dtype=np.int64)
+        expected.flat[indices] = [7, 9]
+        assert_array_equal(arr, expected)
+
+    def test_index_non_integer_dtype(self):
+        arr = np.zeros(5)
+        assert_raises(TypeError, np.put, arr, np.array([1.0, 3.0]), [7, 9])
