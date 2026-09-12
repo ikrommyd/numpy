@@ -10967,6 +10967,8 @@ class TestWritebackIfCopy:
     @pytest.mark.parametrize("dtype", np.typecodes["AllInteger"])
     @pytest.mark.parametrize("func", [np.argmax, np.argmin])
     def test_argminmax_out_integer_dtypes(self, func, dtype):
+        # The indices here fit every integer dtype.  An index too large for
+        # the out dtype is truncated when it is written back.
         mat = np.eye(5)
         if func is np.argmin:
             mat = -mat
