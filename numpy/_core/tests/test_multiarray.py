@@ -8926,6 +8926,17 @@ class TestChoose:
         A = np.choose(ind, (x, y2))
         assert_equal(A, [[2, 2, 3], [2, 2, 3]])
 
+    @pytest.mark.parametrize("dtype", np.typecodes["AllInteger"])
+    def test_index_integer_dtypes(self, dtype):
+        x, y, _, _, _ = self._create_data()
+        ind = np.array([0, 0, 1], dtype=dtype)
+        assert_equal(np.choose(ind, (x, y)), [2, 2, 3])
+
+    def test_index_non_integer_dtype(self):
+        x, y, _, _, _ = self._create_data()
+        with pytest.raises(TypeError):
+            np.choose(np.array([0.0, 0.0, 1.0]), (x, y))
+
     @pytest.mark.parametrize("ops",
         [(1000, np.array([1], dtype=np.uint8)),
          (-1, np.array([1], dtype=np.uint8)),
