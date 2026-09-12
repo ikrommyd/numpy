@@ -3521,6 +3521,12 @@ class TestMethods:
         assert_raises(ValueError, np.searchsorted, a, 0, sorter=[-1, 0, 1, 2, 3])
         assert_raises(ValueError, np.searchsorted, a, 0, sorter=[4, 0, -1, 2, 3])
 
+    @pytest.mark.parametrize("dtype", np.typecodes["AllInteger"])
+    def test_searchsorted_sorter_integer_dtypes(self, dtype):
+        a = np.array([5, 2, 1, 3, 4])
+        s = np.argsort(a).astype(dtype)
+        assert_equal(a.searchsorted([1, 3, 5], sorter=s), [0, 2, 4])
+
     def test_searchsorted_with_sorter(self):
         a = np.random.rand(300)
         s = a.argsort()
