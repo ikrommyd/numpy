@@ -2223,6 +2223,22 @@ class TestMethods:
         assert_equal(A, [[1, 1, 2, 2, 3, 3],
                          [4, 4, 5, 5, 6, 6]])
 
+    @pytest.mark.parametrize("dtype", np.typecodes["AllInteger"])
+    def test_repeat_integer_dtypes(self, dtype):
+        # gh-4384: any integer dtype works as repeats, not only intp
+        m = np.array([1, 2, 3])
+
+        repeats = np.array([1, 3, 2], dtype=dtype)
+        assert_equal(m.repeat(repeats), [1, 2, 2, 2, 3, 3])
+
+        assert_equal(m.repeat(np.array(2, dtype=dtype)),
+                     [1, 1, 2, 2, 3, 3])
+
+    def test_repeat_non_integer_dtype(self):
+        m = np.array([1, 2, 3])
+        with pytest.raises(TypeError):
+            m.repeat(np.array([1.0, 3.0, 2.0]))
+
     def test_reshape(self):
         arr = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]])
 
