@@ -10964,6 +10964,24 @@ class TestWritebackIfCopy:
         res = np.argmin(mat, 0, out=out)
         assert_equal(res, range(5))
 
+    @pytest.mark.parametrize("dtype", np.typecodes["AllInteger"])
+    @pytest.mark.parametrize("func", [np.argmax, np.argmin])
+    def test_argminmax_out_integer_dtypes(self, func, dtype):
+        mat = np.eye(5)
+        if func is np.argmin:
+            mat = -mat
+        out = np.empty(5, dtype=dtype)
+        res = func(mat, 0, out=out)
+        assert_equal(res, range(5))
+        assert res is out
+
+    @pytest.mark.parametrize("dtype", ["f4", "f8", "c8"])
+    def test_argmax_out_non_integer_dtype(self, dtype):
+        mat = np.eye(5)
+        out = np.empty(5, dtype=dtype)
+        with pytest.raises(TypeError):
+            np.argmax(mat, 0, out=out)
+
     def test_insert_noncontiguous(self):
         a = np.arange(6).reshape(2, 3).T  # force non-c-contiguous
         # uses arr_insert
