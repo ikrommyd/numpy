@@ -10976,6 +10976,18 @@ class TestWritebackIfCopy:
         res = np.argmin(mat, 0, out=out)
         assert_equal(res, range(5))
 
+    @pytest.mark.parametrize("array_type, out_type", [
+        (np.int32, np.int32), (np.int32, np.int64),
+        (np.int64, np.int32), (np.int64, np.int64),
+        (np.int32, np.uint32), (np.int32, np.uint64),
+        (np.int64, np.uint32), (np.int64, np.uint64)
+    ])
+    def test_argmax_argmin_out_integer_dtypes(self, array_type, out_type):
+        mat = np.eye(5, dtype=array_type)
+        out = np.empty(5, dtype=out_type)
+        assert_equal(np.argmax(mat, 0, out=out), range(5))
+        assert_equal(np.argmin(-mat, 0, out=out), range(5))
+
     def test_insert_noncontiguous(self):
         a = np.arange(6).reshape(2, 3).T  # force non-c-contiguous
         # uses arr_insert

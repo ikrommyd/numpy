@@ -6,6 +6,7 @@
 #include <structmember.h>
 
 #include "numpy/arrayobject.h"
+#include "arrayobject.h"
 #include "lowlevel_strided_loops.h"
 #include "dtypemeta.h"
 
@@ -166,7 +167,8 @@ _PyArray_ArgMinMaxCommon(PyArrayObject *op,
         }
         rp = (PyArrayObject *)PyArray_FromArray(out,
                               PyArray_DescrFromType(NPY_INTP),
-                              NPY_ARRAY_CARRAY | NPY_ARRAY_WRITEBACKIFCOPY);
+                              NPY_ARRAY_CARRAY | NPY_ARRAY_WRITEBACKIFCOPY |
+                              NPY_ARRAY_SAME_KIND_CASTING);
         if (rp == NULL) {
             goto fail;
         }
