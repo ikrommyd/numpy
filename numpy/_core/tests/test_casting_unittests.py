@@ -924,6 +924,12 @@ class TestCasting:
         with pytest.raises(ValueError):
             unaligned_66.astype(to_dtype, casting='same_value')
 
+        # The first value past the integer range, which `iinfo.max` rounds
+        # up to as a float, must not round trip
+        past_max = np.array([np.iinfo(to_dtype).max + 1], dtype=from_dtype)
+        with pytest.raises(ValueError):
+            past_max.astype(to_dtype, casting='same_value')
+
     @pytest.mark.parametrize("to_dtype",
             np.typecodes["AllInteger"])
     @pytest.mark.parametrize("from_dtype",

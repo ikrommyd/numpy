@@ -99,5 +99,26 @@ npy_mul_with_overflow_size_t(size_t * r, size_t a, size_t b)
 }
 
 
+/**begin repeat
+ *  #name = intp, int64#
+ *  #type = npy_intp, npy_int64#
+ *  #MIN = NPY_MIN_INTP, NPY_MIN_INT64#
+ */
+/*
+ * Converts `v` to @type@ and returns 0, or returns -1 if `v` is NaN or out of
+ * range. `-(double)@MIN@` is a power of two, so unlike `(double)NPY_MAX_*`,
+ * which rounds up, both bounds are exact.
+ */
+static inline int
+npy_double_to_@name@(double v, @type@ *out)
+{
+    if (!(v >= (double)@MIN@ && v < -(double)@MIN@)) {
+        return -1;
+    }
+    *out = (@type@)v;
+    return 0;
+}
+/**end repeat**/
+
 #endif
 

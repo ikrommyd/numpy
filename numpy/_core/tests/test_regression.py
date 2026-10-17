@@ -1318,10 +1318,11 @@ class TestRegression:
                                  'Maximum allowed dimension exceeded'):
             np.empty(sz)
 
-    def test_huge_arange(self):
+    # 2**63 is just past the intp range, where a float bound check rounds up
+    @pytest.mark.parametrize("sz", [2 ** 63, 2 ** 64])
+    def test_huge_arange(self, sz):
         # Regression test for #1062.
         # Set a size which cannot fit into a 64 bits signed integer
-        sz = 2 ** 64
         with assert_raises_regex(ValueError,
                                  'Maximum allowed size exceeded'):
             np.arange(sz)

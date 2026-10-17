@@ -1751,6 +1751,8 @@ class TestDateTime:
                 check(np.timedelta64(1, "s"), f, nat)
                 check(np.timedelta64(0, "s"), f, nat)
                 check(nat, f, nat)
+            # finite, but out of the int64 range
+            check(np.timedelta64(1, "s"), 1e20, nat)
 
     @pytest.mark.parametrize("op1, op2, exp", [
         # m8 same units round down
@@ -2011,6 +2013,8 @@ class TestDateTime:
                 assert_equal(np.timedelta64(0) / tp(0), nat)
                 assert_equal(nat / tp(0), nat)
                 assert_equal(nat / tp(2), nat)
+            # finite, but out of the int64 range
+            assert_equal(np.timedelta64(1, 's') / 1e-20, nat)
             # Division by inf
             assert_equal(np.timedelta64(1) / float('inf'), np.timedelta64(0))
             assert_equal(np.timedelta64(0) / float('inf'), np.timedelta64(0))
